@@ -23,9 +23,9 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 ON_CLOUD = platform.system() == "Linux"  # Streamlit Cloud runs on Linux
 
 # ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Google Maps Scraper", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="Google Maps Scraper", layout="wide")
 
-st.title("🗺️ Google Maps Keyword Scraper")
+st.title("Google Maps Keyword Scraper")
 st.caption("Search any keyword in any location and extract the details you need.")
 st.divider()
 
@@ -63,7 +63,6 @@ with st.sidebar:
     st.subheader("Scraper Settings")
 
     max_scrolls  = st.slider("Max Scrolls",       min_value=5,  max_value=100, value=20)
-    headless     = st.toggle("Headless Browser",  value=True)
     get_detailed = st.toggle("Detailed Mode (slower, more accurate phone/address)", value=True)
 
     run_btn = st.button("Start Scraping", type="primary", use_container_width=True)
@@ -362,7 +361,7 @@ if run_btn:
             pass
 
         with st.spinner(f"Scraping **{search_query}** ..."):
-            scrape(search_query, max_scrolls, headless, get_detailed, log_fn, results)
+            scrape(search_query, max_scrolls, True, get_detailed, log_fn, results)
 
         st.success(f"Scraping complete — {len(results)} results found.")
 
