@@ -62,7 +62,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Scraper Settings")
 
-    max_scrolls  = st.slider("Max Scrolls",       min_value=5,  max_value=100, value=20)
+    max_scrolls  = st.slider("Max Scrolls",       min_value=1,  max_value=20, value=10)
     get_detailed = st.toggle("Detailed Mode (slower, more accurate phone/address)", value=True)
 
     run_btn = st.button("Start Scraping", type="primary", use_container_width=True)
