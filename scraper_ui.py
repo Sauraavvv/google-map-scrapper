@@ -81,7 +81,7 @@ def make_chrome_options(headless: bool) -> Options:
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--remote-debugging-port=9222")
     if ON_CLOUD:
-        opts.binary_location = "/usr/bin/chromium-browser"
+        opts.binary_location = "/usr/bin/chromium"
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument(
@@ -96,6 +96,7 @@ def make_driver(headless: bool) -> webdriver.Chrome:
     if ON_CLOUD:
         service = Service("/usr/bin/chromedriver")
         return webdriver.Chrome(service=service, options=opts)
+
     return webdriver.Chrome(options=opts)
 
 
