@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.csv
+*.json
+*.log
+*.zip
+*.bak
+backup/
+duplicates_state_wise/
+original states/
+relocated_data/
+priority/
+geocode_run/
+.DS_Store
