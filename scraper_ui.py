@@ -355,14 +355,22 @@ if run_btn:
             "category": want_category,
         }
 
-        results = []
+        log_placeholder = st.empty()
+        log_lines = []
+        results   = []
+
+        _hidden = ("Browser started", "Navigated to search URL", "Current URL")
 
         def log_fn(msg: str):
-            pass
+            if any(msg.startswith(h) for h in _hidden):
+                return
+            log_lines.append(msg)
+            log_placeholder.text("\n".join(log_lines[-30:]))
 
-        with st.spinner(f"Scraping **{search_query}** ..."):
+        with st.spinner(f"Scraping {search_query} ..."):
             scrape(search_query, max_scrolls, True, get_detailed, log_fn, results)
 
+        log_placeholder.empty()
         st.success(f"Scraping complete — {len(results)} results found.")
 
         if results:
