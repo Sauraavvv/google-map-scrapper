@@ -356,18 +356,14 @@ if run_btn:
             "category": want_category,
         }
 
-        log_placeholder = st.empty()
-        log_lines = []
-        results   = []
+        results = []
 
         def log_fn(msg: str):
-            log_lines.append(msg)
-            log_placeholder.text("\n".join(log_lines[-30:]))
+            pass
 
         with st.spinner(f"Scraping **{search_query}** ..."):
             scrape(search_query, max_scrolls, headless, get_detailed, log_fn, results)
 
-        log_placeholder.empty()
         st.success(f"Scraping complete — {len(results)} results found.")
 
         if results:
