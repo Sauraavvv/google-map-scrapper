@@ -75,6 +75,9 @@ with st.sidebar:
 
 def find_browser_binary():
     """Path to an installed Chrome/Chromium, or None if the host has none."""
+    pinned = os.environ.get("CHROME_BIN")
+    if pinned and os.path.exists(pinned):
+        return pinned
     for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
         found = shutil.which(name)
         if found:
@@ -172,8 +175,12 @@ def launch_diagnostics() -> str:
 
 def make_driver(headless: bool) -> webdriver.Chrome:
     opts = make_chrome_options(headless)
-    # Selenium Manager fetches a matching chromedriver unless one is on PATH.
-    system_driver = shutil.which("chromedriver")
+    # Selenium Manager fetches a matching chromedriver unless one is provided.
+    pinned_driver = os.environ.get("CHROMEDRIVER_BIN")
+    if pinned_driver and os.path.exists(pinned_driver):
+        system_driver = pinned_driver
+    else:
+        system_driver = shutil.which("chromedriver")
     try:
         if system_driver:
             return webdriver.Chrome(service=Service(system_driver), options=opts)
