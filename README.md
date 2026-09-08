@@ -50,12 +50,21 @@ installing Chromium from Debian.
 
 ## A note on hosting
 
-This does not work on Streamlit Community Cloud. Installing Chromium there
+This needs a host where you control the image, because Chromium has to be
+installed at build time.
+
+It does **not** work on Streamlit Community Cloud. Installing Chromium there
 needs `packages.txt`, and since Debian 11 "bullseye" reached end of LTS on
 2026-08-31 its expired security repository makes `apt-get update` exit
 non-zero, which fails the build for every app that ships one. Without root
-there is no supported way to install the libraries by hand. Use a host where
-you control the image.
+there is no supported way to install the libraries by hand.
+
+Hugging Face Spaces moved the Docker SDK behind a paid plan in July 2026, so
+a free personal account can no longer create one. The Space frontmatter above
+is kept for anyone on PRO.
+
+The image reads `$PORT`, so it runs unmodified on Cloud Run, Koyeb, Render and
+similar, defaulting to 7860 for Spaces.
 
 Separately, Google serves consent walls and CAPTCHAs to datacenter IP ranges,
 so cloud deployments often return no results even with a working browser.
