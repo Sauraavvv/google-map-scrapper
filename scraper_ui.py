@@ -7,8 +7,10 @@ import os
 import time
 import re
 import io
+import glob
 import shutil
 import platform
+import subprocess
 import urllib.parse
 import pandas as pd
 import streamlit as st
@@ -119,13 +121,68 @@ def make_chrome_options(headless: bool) -> Options:
     return opts
 
 
+def missing_shared_libs(path: str) -> list:
+    """Shared libraries `path` needs but cannot resolve, via ldd (Linux only)."""
+    if not path or not os.path.exists(path) or not shutil.which("ldd"):
+        return []
+    try:
+        out = subprocess.run(
+            ["ldd", path], capture_output=True, text=True, timeout=30
+        )
+    except Exception:
+        return []
+    seen = []
+    for line in (out.stdout + out.stderr).splitlines():
+        if "not found" in line:
+            soname = line.strip().split(" =>")[0].strip()
+            if soname and soname not in seen:
+                seen.append(soname)
+    return seen
+
+
+def cached_binaries() -> dict:
+    """Binaries Selenium Manager downloaded, so we can inspect them on failure."""
+    home = os.path.expanduser("~")
+    found = {}
+    for label, pattern in (
+        ("chromedriver", f"{home}/.cache/selenium/chromedriver/*/*/chromedriver"),
+        ("chrome", f"{home}/.cache/selenium/chrome/*/chrome"),
+    ):
+        hits = glob.glob(pattern)
+        if hits:
+            found[label] = sorted(hits)[-1]
+    return found
+
+
+def launch_diagnostics() -> str:
+    """Human-readable reason the browser stack will not start, if we can tell."""
+    lines = []
+    for label, path in cached_binaries().items():
+        missing = missing_shared_libs(path)
+        if missing:
+            lines.append(f"{label} is missing {len(missing)} shared librar"
+                         f"{'y' if len(missing) == 1 else 'ies'}:")
+            lines.extend(f"    {so}" for so in missing)
+    if not lines:
+        return ""
+    lines.append("")
+    lines.append("These come from system packages that are not installed on this host.")
+    return "\n".join(lines)
+
+
 def make_driver(headless: bool) -> webdriver.Chrome:
     opts = make_chrome_options(headless)
     # Selenium Manager fetches a matching chromedriver unless one is on PATH.
     system_driver = shutil.which("chromedriver")
-    if system_driver:
-        return webdriver.Chrome(service=Service(system_driver), options=opts)
-    return webdriver.Chrome(options=opts)
+    try:
+        if system_driver:
+            return webdriver.Chrome(service=Service(system_driver), options=opts)
+        return webdriver.Chrome(options=opts)
+    except Exception as e:
+        detail = launch_diagnostics()
+        if detail:
+            raise RuntimeError(f"{type(e).__name__}: {e}\n\n{detail}") from e
+        raise
 
 
 def extract_lat_lng(url: str):
@@ -403,7 +460,10 @@ if run_btn:
         log_placeholder.empty()
 
         if error:
-            st.error(f"Scraper stopped — {error}")
+            headline, _, detail = error.partition("\n")
+            st.error(f"Scraper stopped — {headline}")
+            if detail.strip():
+                st.code(detail.strip())
             st.caption(
                 "On the first cloud run this is usually Chrome being downloaded or "
                 "failing to launch. Retry once; if it persists, check the app logs."
