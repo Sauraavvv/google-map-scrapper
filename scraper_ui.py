@@ -297,16 +297,36 @@ def read_phone(driver):
     return strip_label(el.get_attribute("aria-label"))
 
 
-def get_detailed_info(driver):
-    info = {"address": None, "phone": None}
-    # Wait for the place panel itself, rather than sleeping a fixed 1.5s and
-    # hoping. Any data-item-id button means the detail pane has rendered.
+def panel_rendered(driver, timeout: int = 10) -> bool:
+    """Any data-item-id button means the place's detail pane has rendered."""
     try:
-        WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-item-id]"))
         )
+        return True
     except TimeoutException:
-        return info
+        return False
+
+
+def get_detailed_info(driver, debug=None):
+    info = {"address": None, "phone": None}
+    if not panel_rendered(driver):
+        # A consent wall can reappear on later navigations, not just the first.
+        dismiss_consent(driver)
+        if not panel_rendered(driver, timeout=8):
+            if debug:
+                debug(f"  panel never rendered — url now {driver.current_url[:70]}")
+                debug(f"  page title: {driver.title[:60]!r}")
+            return info
+
+    if debug:
+        ids = []
+        for b in driver.find_elements(By.CSS_SELECTOR, "button[data-item-id]"):
+            try:
+                ids.append(b.get_attribute("data-item-id"))
+            except Exception:
+                pass
+        debug(f"  panel buttons: {ids[:8]}")
 
     try:
         el = driver.find_element(By.CSS_SELECTOR, 'button[data-item-id="address"]')
@@ -376,7 +396,9 @@ def collect_cards(driver, log_fn) -> list:
                 pass
 
             try:
-                href = el.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
+                href = el.find_element(
+                    By.CSS_SELECTOR, 'a[href*="/maps/place/"]'
+                ).get_attribute("href")
                 if href:
                     row["url"] = href
                     row["latitude"], row["longitude"] = extract_lat_lng(href)
@@ -462,21 +484,29 @@ def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
         # Phase 2 — visit each place directly for the fields the cards omit.
         if get_detailed and cards:
             log_fn(f"Opening {len(cards)} places for address and phone...")
+            no_url = sum(1 for r in cards if not r.get("url"))
+            if no_url:
+                log_fn(f"  {no_url} of {len(cards)} cards had no place link")
+            got_addr = got_phone = 0
             for i, row in enumerate(cards, 1):
                 url = row.pop("url", None)
                 if not url:
                     continue
                 try:
                     driver.get(url)
-                    detail = get_detailed_info(driver)
+                    # Narrate the first place so a cloud-only failure is visible.
+                    detail = get_detailed_info(driver, log_fn if i == 1 else None)
                     if detail["address"]:
                         row["address"] = detail["address"]
+                        got_addr += 1
                     if detail["phone"]:
                         row["phone"] = detail["phone"]
+                        got_phone += 1
                 except Exception as e:
                     log_fn(f"  [{i}] {row['name']} — detail failed: {e}")
                 if i % 5 == 0 or i == len(cards):
-                    log_fn(f"  detailed {i}/{len(cards)}")
+                    log_fn(f"  detailed {i}/{len(cards)}"
+                           f" — {got_addr} addresses, {got_phone} phones")
         else:
             for row in cards:
                 row.pop("url", None)
@@ -558,6 +588,12 @@ if run_btn:
             error = scrape(search_query, max_scrolls, True, get_detailed, log_fn, results)
 
         log_placeholder.empty()
+
+        # Keep the log after the run; a cloud-only failure is only debuggable
+        # from what the scraper saw while it was running.
+        if log_lines:
+            with st.expander("Scraper log", expanded=False):
+                st.code("\n".join(log_lines))
 
         if error:
             headline, _, detail = error.partition("\n")
