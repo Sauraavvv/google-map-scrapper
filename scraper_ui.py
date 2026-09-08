@@ -122,6 +122,14 @@ def make_chrome_options(headless: bool, binary: str = None, lean: bool = None) -
         opts.add_argument("--js-flags=--max-old-space-size=256")
         opts.add_argument("--mute-audio")
         opts.add_argument("--window-size=1280,900")
+        # Site isolation gives every origin its own process. That is a security
+        # feature we do not need here and the single largest memory cost left.
+        opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
+        opts.add_argument("--disable-accelerated-2d-canvas")
+        opts.add_argument("--disable-breakpad")
+        opts.add_argument("--disable-sync")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--disk-cache-size=1")
     else:
         opts.add_argument("--window-size=1920,1080")
     # Port 0 = let Chrome pick a free one; a fixed port collides across reruns.
@@ -204,12 +212,16 @@ def preferred_chromedriver():
     return shutil.which("chromedriver")
 
 
-def retry_with_installed_libs(headless: bool, log):
-    """Unpack Chrome's shared libraries, then launch against them.
+# Once the unpacked-library path is known to work, later launches go straight
+# there. Rediscovering it means starting Chrome twice per restart, and on a
+# host already short of memory that churn is what we are trying to avoid.
+_USE_UNPACKED_LIBS = False
 
-    Only reached after a first launch has already failed, which means Selenium
-    Manager has downloaded the browser and driver — they just could not start.
-    """
+
+def launch_with_installed_libs(headless: bool, log):
+    """Unpack Chrome's shared libraries if needed, then launch against them."""
+    global _USE_UNPACKED_LIBS
+
     root = chrome_deps.ensure_libraries(log)
     if not root:
         return None
@@ -226,12 +238,21 @@ def retry_with_installed_libs(headless: bool, log):
     paths = chrome_deps.library_path(root) + ([existing] if existing else [])
     env["LD_LIBRARY_PATH"] = ":".join(paths)
 
-    log("Retrying browser launch against the unpacked libraries...")
+    if not _USE_UNPACKED_LIBS:
+        log("Retrying browser launch against the unpacked libraries...")
     opts = make_chrome_options(headless, binary=chrome)  # lean follows ON_CLOUD
-    return webdriver.Chrome(service=Service(driver_path, env=env), options=opts)
+    driver = webdriver.Chrome(service=Service(driver_path, env=env), options=opts)
+    _USE_UNPACKED_LIBS = True
+    return driver
 
 
 def make_driver(headless: bool, log=lambda m: None) -> webdriver.Chrome:
+    # Skip the doomed first attempt once we know this host needs the libraries.
+    if _USE_UNPACKED_LIBS:
+        driver = launch_with_installed_libs(headless, log)
+        if driver is not None:
+            return driver
+
     opts = make_chrome_options(headless)
     system_driver = preferred_chromedriver()
     try:
@@ -243,7 +264,7 @@ def make_driver(headless: bool, log=lambda m: None) -> webdriver.Chrome:
         # Missing shared libraries are recoverable without root; try once.
         if detail and ON_CLOUD:
             try:
-                driver = retry_with_installed_libs(headless, log)
+                driver = launch_with_installed_libs(headless, log)
                 if driver is not None:
                     return driver
             except Exception as retry_error:
@@ -461,43 +482,73 @@ def quit_quietly(driver) -> None:
         pass
 
 
+# A Maps place page leaks enough per visit that a memory-capped host dies
+# after a handful. Recycling before that costs a few seconds; crashing costs
+# the page being read plus a full relaunch.
+RECYCLE_EVERY = 5
+
+
 def fetch_details(driver, cards: list, headless: bool, log_fn):
     """Visit each place for address and phone.
 
     A place page can push the renderer past the host's memory limit and take
-    the whole session with it, so a dead browser is replaced and the pass
-    continues rather than losing every remaining row.
+    the whole session with it, so the browser is recycled before that happens
+    and replaced when it happens anyway.
     """
     got_addr = got_phone = restarts = 0
     total = len(cards)
+    # Restarts have to scale with the work; a fixed budget just truncates a
+    # long run partway through.
+    budget = max(MAX_RESTARTS, total // 2)
+    exhausted = False
 
     for i, row in enumerate(cards, 1):
         url = row.pop("url", None)
         if not url:
             continue
-        try:
-            driver.get(url)
-            detail = get_detailed_info(driver, log_fn if i == 1 else None)
-        except Exception as e:
-            if session_is_dead(e):
-                if restarts >= MAX_RESTARTS:
+
+        if i > 1 and (i - 1) % RECYCLE_EVERY == 0:
+            quit_quietly(driver)
+            driver = make_driver(headless, log_fn)
+
+        detail = None
+        # Two attempts, so a place is retried on the fresh browser rather than
+        # being the one row a crash silently costs us.
+        for _ in range(2):
+            try:
+                driver.get(url)
+                detail = get_detailed_info(driver, log_fn if i == 1 else None)
+                break
+            except Exception as e:
+                if not session_is_dead(e):
+                    log_fn(f"  [{i}] detail failed: {first_line(e)}")
+                    break
+                if restarts >= budget:
                     log_fn(f"  browser keeps dying — stopping after {i - 1} places")
+                    exhausted = True
                     break
                 restarts += 1
-                log_fn(f"  browser died, most likely out of memory — "
-                       f"restarting ({restarts}/{MAX_RESTARTS})")
+                log_fn(f"  browser died out of memory — restart {restarts}/{budget}")
                 quit_quietly(driver)
                 driver = make_driver(headless, log_fn)
-                continue
-            log_fn(f"  [{i}] detail failed: {first_line(e)}")
-            continue
+        if exhausted:
+            break
 
-        if detail["address"]:
-            row["address"] = detail["address"]
-            got_addr += 1
-        if detail["phone"]:
-            row["phone"] = detail["phone"]
-            got_phone += 1
+        if detail:
+            if detail["address"]:
+                row["address"] = detail["address"]
+                got_addr += 1
+            if detail["phone"]:
+                row["phone"] = detail["phone"]
+                got_phone += 1
+
+        # Drop the page before loading the next one; holding a rendered Maps
+        # page while opening another is what tips the container over.
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+
         if i % 5 == 0 or i == total:
             log_fn(f"  detailed {i}/{total} — {got_addr} addresses, {got_phone} phones")
 
@@ -659,6 +710,20 @@ if run_btn:
         if log_lines:
             with st.expander("Scraper log", expanded=False):
                 st.code("\n".join(log_lines))
+
+        if results:
+            asked = [("phone", want_phone), ("address", want_address)]
+            bits = [
+                f"{name} for {sum(1 for r in results if r.get(name))}"
+                f" of {len(results)}"
+                for name, wanted in asked if wanted
+            ]
+            if bits:
+                st.caption(
+                    "Found " + ", ".join(bits) + ". Places that list no number "
+                    "on Google Maps come back empty — that is the source data, "
+                    "not a failed read."
+                )
 
         if error:
             headline, _, detail = error.partition("\n")
