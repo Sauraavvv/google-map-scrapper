@@ -17,8 +17,6 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
@@ -282,6 +280,80 @@ def get_detailed_info(driver):
     return info
 
 
+FEED_CARDS = 'div[role="feed"] > div > div[jsaction]'
+
+
+def card_text(el, selector: str):
+    try:
+        return el.find_element(By.CSS_SELECTOR, selector).text.strip() or None
+    except Exception:
+        return None
+
+
+def collect_cards(driver, log_fn) -> list:
+    """Read every result card off the feed, deduplicated by place URL.
+
+    Stays on the results page throughout: navigating away destroys the feed,
+    and it does not reliably return.
+    """
+    cards = []
+    seen = set()
+    total = len(driver.find_elements(By.CSS_SELECTOR, FEED_CARDS))
+    log_fn(f"Extracting data from {total} result cards...")
+
+    for idx in range(total):
+        try:
+            items = driver.find_elements(By.CSS_SELECTOR, FEED_CARDS)
+            if idx >= len(items):
+                break
+            el = items[idx]
+
+            row = {
+                "name": card_text(el, "div.fontHeadlineSmall"),
+                "category": None, "rating": card_text(el, "span.MW4etd"),
+                "reviews_count": None, "address": None, "phone": None,
+                "latitude": None, "longitude": None, "url": None,
+            }
+
+            reviews = card_text(el, "span.UY7F9")
+            if reviews:
+                row["reviews_count"] = reviews.strip("()").replace(",", "")
+
+            try:
+                spans = el.find_elements(By.CSS_SELECTOR, "div.W4Efsd > span")
+                if spans:
+                    row["category"] = spans[0].text.strip() or None
+                for sp in spans[1:]:
+                    t = sp.text.strip()
+                    if t and t != "·":
+                        row["address"] = t
+                        break
+            except Exception:
+                pass
+
+            try:
+                href = el.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
+                if href:
+                    row["url"] = href
+                    row["latitude"], row["longitude"] = extract_lat_lng(href)
+            except Exception:
+                pass
+
+            if not row["name"]:
+                continue
+            # Key on the place URL so two branches of one chain both survive.
+            key = row["url"] or row["name"]
+            if key in seen:
+                continue
+            seen.add(key)
+            cards.append(row)
+
+        except Exception as e:
+            log_fn(f"  Error on item {idx}: {e}")
+
+    return cards
+
+
 def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
            log_fn, result_store: list):
     driver = None
@@ -336,102 +408,38 @@ def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
         except (NoSuchElementException, TimeoutException):
             log_fn("No results list found — Google may have shown a single place or CAPTCHA.")
 
-        # Extract
-        items = driver.find_elements(
-            By.CSS_SELECTOR, 'div[role="feed"] > div > div[jsaction]'
-        )
-        log_fn(f"Extracting data from {len(items)} result cards...")
-        seen = set()
+        # Phase 1 — read every card off the list without navigating away.
+        # Clicking into a place replaces the feed, and it does not reliably come
+        # back, so anything that leaves this page has to wait until the list is
+        # fully harvested.
+        cards = collect_cards(driver, log_fn)
+        log_fn(f"Collected {len(cards)} unique places from the list.")
 
-        for idx, _ in enumerate(items):
-            try:
-                items = driver.find_elements(
-                    By.CSS_SELECTOR, 'div[role="feed"] > div > div[jsaction]'
-                )
-                if idx >= len(items):
-                    break
-                el = items[idx]
-
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                time.sleep(0.2)
-
-                row = {
-                    "name": None, "category": None, "rating": None,
-                    "reviews_count": None, "address": None, "phone": None,
-                    "latitude": None, "longitude": None,
-                }
-
-                try:
-                    row["name"] = el.find_element(By.CSS_SELECTOR, "div.fontHeadlineSmall").text
-                except Exception:
-                    pass
-
-                try:
-                    row["rating"] = el.find_element(By.CSS_SELECTOR, "span.MW4etd").text
-                except Exception:
-                    pass
-
-                try:
-                    rev = el.find_element(By.CSS_SELECTOR, "span.UY7F9").text
-                    row["reviews_count"] = rev.strip("()").replace(",", "")
-                except Exception:
-                    pass
-
-                try:
-                    spans = el.find_elements(By.CSS_SELECTOR, "div.W4Efsd > span")
-                    if spans:
-                        row["category"] = spans[0].text or None
-                    for sp in spans[1:]:
-                        t = sp.text.strip()
-                        if t and t != "·":
-                            row["address"] = t
-                            break
-                except Exception:
-                    pass
-
-                try:
-                    link = el.find_element(By.CSS_SELECTOR, "a")
-                    href = link.get_attribute("href")
-                    row["latitude"], row["longitude"] = extract_lat_lng(href or "")
-                except Exception:
-                    pass
-
-                if not row["name"] or row["name"] in seen:
+        # Phase 2 — visit each place directly for the fields the cards omit.
+        if get_detailed and cards:
+            log_fn(f"Opening {len(cards)} places for address and phone...")
+            for i, row in enumerate(cards, 1):
+                url = row.pop("url", None)
+                if not url:
                     continue
-                seen.add(row["name"])
+                try:
+                    driver.get(url)
+                    detail = get_detailed_info(driver)
+                    if detail["address"]:
+                        row["address"] = detail["address"]
+                    if detail["phone"]:
+                        row["phone"] = detail["phone"]
+                except Exception as e:
+                    log_fn(f"  [{i}] {row['name']} — detail failed: {e}")
+                if i % 5 == 0 or i == len(cards):
+                    log_fn(f"  detailed {i}/{len(cards)}")
+        else:
+            for row in cards:
+                row.pop("url", None)
 
-                # Click for detailed address / phone
-                if get_detailed:
-                    try:
-                        items = driver.find_elements(
-                            By.CSS_SELECTOR, 'div[role="feed"] > div > div[jsaction]'
-                        )
-                        if idx < len(items):
-                            lnk = items[idx].find_element(By.CSS_SELECTOR, "a")
-                            driver.execute_script("arguments[0].click();", lnk)
-                            detail = get_detailed_info(driver)
-                            if detail["address"]:
-                                row["address"] = detail["address"]
-                            if detail["phone"]:
-                                row["phone"] = detail["phone"]
-                            # Go back
-                            try:
-                                back = driver.find_element(
-                                    By.CSS_SELECTOR, 'button[aria-label*="Back"]'
-                                )
-                                back.click()
-                                time.sleep(0.5)
-                            except Exception:
-                                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                                time.sleep(0.5)
-                    except Exception:
-                        pass
-
-                result_store.append(row)
-                log_fn(f"  [{len(result_store)}] {row['name']}")
-
-            except Exception as e:
-                log_fn(f"  Error on item {idx}: {e}")
+        result_store.extend(cards)
+        for i, row in enumerate(result_store, 1):
+            log_fn(f"  [{i}] {row['name']}")
 
         log_fn(f"Done — {len(result_store)} results collected.")
 
