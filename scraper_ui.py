@@ -3,9 +3,11 @@ Google Maps Keyword Scraper — Streamlit UI
 Search any keyword in any location, pick which fields to extract.
 """
 
+import os
 import time
 import re
 import io
+import shutil
 import platform
 import urllib.parse
 import pandas as pd
@@ -69,6 +71,23 @@ with st.sidebar:
 
 # ── Core scraper ──────────────────────────────────────────────────────────────
 
+def find_browser_binary():
+    """Path to an installed Chrome/Chromium, or None if the host has none."""
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in (
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ):
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def make_chrome_options(headless: bool) -> Options:
     opts = Options()
     if headless or ON_CLOUD:
@@ -78,9 +97,19 @@ def make_chrome_options(headless: bool) -> Options:
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--remote-debugging-port=9222")
-    if ON_CLOUD:
-        opts.binary_location = "/usr/bin/chromium"
+    # Port 0 = let Chrome pick a free one; a fixed port collides across reruns.
+    opts.add_argument("--remote-debugging-port=0")
+
+    binary = find_browser_binary()
+    if binary:
+        opts.binary_location = binary
+    elif ON_CLOUD:
+        # Streamlit Cloud with no packages.txt: nothing is installed. Naming a
+        # version makes Selenium Manager download and cache Chrome for Testing.
+        # Only on Linux — elsewhere Selenium Manager finds app-bundle installs
+        # on its own, and forcing this would trigger a pointless download.
+        opts.browser_version = "stable"
+
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument(
@@ -92,10 +121,10 @@ def make_chrome_options(headless: bool) -> Options:
 
 def make_driver(headless: bool) -> webdriver.Chrome:
     opts = make_chrome_options(headless)
-    if ON_CLOUD:
-        service = Service("/usr/bin/chromedriver")
-        return webdriver.Chrome(service=service, options=opts)
-
+    # Selenium Manager fetches a matching chromedriver unless one is on PATH.
+    system_driver = shutil.which("chromedriver")
+    if system_driver:
+        return webdriver.Chrome(service=Service(system_driver), options=opts)
     return webdriver.Chrome(options=opts)
 
 
@@ -303,6 +332,7 @@ def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
 
     except Exception as e:
         log_fn(f"Fatal error: {e}")
+        return f"{type(e).__name__}: {e}"
     finally:
         if driver:
             try:
@@ -368,10 +398,18 @@ if run_btn:
             log_placeholder.text("\n".join(log_lines[-30:]))
 
         with st.spinner(f"Scraping {search_query} ..."):
-            scrape(search_query, max_scrolls, True, get_detailed, log_fn, results)
+            error = scrape(search_query, max_scrolls, True, get_detailed, log_fn, results)
 
         log_placeholder.empty()
-        st.success(f"Scraping complete — {len(results)} results found.")
+
+        if error:
+            st.error(f"Scraper stopped — {error}")
+            st.caption(
+                "On the first cloud run this is usually Chrome being downloaded or "
+                "failing to launch. Retry once; if it persists, check the app logs."
+            )
+        else:
+            st.success(f"Scraping complete — {len(results)} results found.")
 
         if results:
             df = filter_fields(results, want_map)
@@ -387,5 +425,5 @@ if run_btn:
                 mime="text/csv",
                 type="primary",
             )
-        else:
+        elif not error:
             st.warning("No results found. Try a different keyword or location.")

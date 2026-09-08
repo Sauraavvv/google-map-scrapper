@@ -1,3 +1,3 @@
 streamlit>=1.32.0
-selenium>=4.18.0
+selenium>=4.18.0  # >=4.11 needed so Selenium Manager can download the browser
 pandas>=2.0.0
