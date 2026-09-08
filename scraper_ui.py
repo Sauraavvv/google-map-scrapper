@@ -24,6 +24,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+import chrome_deps
+
 ON_CLOUD = platform.system() == "Linux"  # Streamlit Cloud runs on Linux
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -93,7 +95,7 @@ def find_browser_binary():
     return None
 
 
-def make_chrome_options(headless: bool) -> Options:
+def make_chrome_options(headless: bool, binary: str = None) -> Options:
     opts = Options()
     if headless or ON_CLOUD:
         opts.add_argument("--headless=new")
@@ -105,7 +107,7 @@ def make_chrome_options(headless: bool) -> Options:
     # Port 0 = let Chrome pick a free one; a fixed port collides across reruns.
     opts.add_argument("--remote-debugging-port=0")
 
-    binary = find_browser_binary()
+    binary = binary or find_browser_binary()
     if binary:
         opts.binary_location = binary
     elif ON_CLOUD:
@@ -173,20 +175,59 @@ def launch_diagnostics() -> str:
     return "\n".join(lines)
 
 
-def make_driver(headless: bool) -> webdriver.Chrome:
+def preferred_chromedriver():
+    """An explicitly provided chromedriver, or one on PATH. None means let
+    Selenium Manager resolve it."""
+    pinned = os.environ.get("CHROMEDRIVER_BIN")
+    if pinned and os.path.exists(pinned):
+        return pinned
+    return shutil.which("chromedriver")
+
+
+def retry_with_installed_libs(headless: bool, log):
+    """Unpack Chrome's shared libraries, then launch against them.
+
+    Only reached after a first launch has already failed, which means Selenium
+    Manager has downloaded the browser and driver — they just could not start.
+    """
+    root = chrome_deps.ensure_libraries(log)
+    if not root:
+        return None
+
+    cached = cached_binaries()
+    chrome = cached.get("chrome")
+    driver_path = preferred_chromedriver() or cached.get("chromedriver")
+    if not driver_path:
+        log("  no chromedriver to retry with")
+        return None
+
+    env = dict(os.environ)
+    existing = env.get("LD_LIBRARY_PATH")
+    paths = chrome_deps.library_path(root) + ([existing] if existing else [])
+    env["LD_LIBRARY_PATH"] = ":".join(paths)
+
+    log("Retrying browser launch against the unpacked libraries...")
+    opts = make_chrome_options(headless, binary=chrome)
+    return webdriver.Chrome(service=Service(driver_path, env=env), options=opts)
+
+
+def make_driver(headless: bool, log=lambda m: None) -> webdriver.Chrome:
     opts = make_chrome_options(headless)
-    # Selenium Manager fetches a matching chromedriver unless one is provided.
-    pinned_driver = os.environ.get("CHROMEDRIVER_BIN")
-    if pinned_driver and os.path.exists(pinned_driver):
-        system_driver = pinned_driver
-    else:
-        system_driver = shutil.which("chromedriver")
+    system_driver = preferred_chromedriver()
     try:
         if system_driver:
             return webdriver.Chrome(service=Service(system_driver), options=opts)
         return webdriver.Chrome(options=opts)
     except Exception as e:
         detail = launch_diagnostics()
+        # Missing shared libraries are recoverable without root; try once.
+        if detail and ON_CLOUD:
+            try:
+                driver = retry_with_installed_libs(headless, log)
+                if driver is not None:
+                    return driver
+            except Exception as retry_error:
+                detail = f"{launch_diagnostics() or detail}\n\nRetry failed: {retry_error}"
         if detail:
             raise RuntimeError(f"{type(e).__name__}: {e}\n\n{detail}") from e
         raise
@@ -245,7 +286,7 @@ def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
            log_fn, result_store: list):
     driver = None
     try:
-        driver = make_driver(headless)
+        driver = make_driver(headless, log_fn)
         log_fn("Browser started.")
 
         # Navigate directly to search URL (more reliable than typing in box)

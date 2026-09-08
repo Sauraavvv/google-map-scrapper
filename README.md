@@ -53,11 +53,29 @@ installing Chromium from Debian.
 This needs a host where you control the image, because Chromium has to be
 installed at build time.
 
-It does **not** work on Streamlit Community Cloud. Installing Chromium there
-needs `packages.txt`, and since Debian 11 "bullseye" reached end of LTS on
-2026-08-31 its expired security repository makes `apt-get update` exit
-non-zero, which fails the build for every app that ships one. Without root
-there is no supported way to install the libraries by hand.
+### Streamlit Community Cloud
+
+Installing Chromium there normally needs `packages.txt`, but since Debian 11
+"bullseye" reached end of LTS on 2026-08-31, its expired security suite makes
+the platform's `apt-get update` exit non-zero and fails the build for every
+app that ships one. This repo therefore has no `packages.txt`.
+
+Instead, `chrome_deps.py` installs the libraries at run time, without root.
+It is only reached after a launch has already failed on a Linux host, so it
+costs nothing anywhere else:
+
+1. Selenium Manager downloads Chrome for Testing, which dies with exit code
+   127 because the libraries it links against are absent.
+2. `ldd` names the unresolved sonames.
+3. A private apt environment is built under `~/.cache/chrome-deps`, pointing
+   only at a live Debian suite rather than the expired one.
+4. `apt-get download` and `dpkg-deb -x` unpack chromium's dependency closure,
+   skipping chromium itself since a browser is already present.
+5. The launch is retried with `LD_LIBRARY_PATH` set to the unpacked prefix.
+
+This is a workaround, not a supported path. The first run is slow, and the
+free tier's 1 GB memory ceiling is a real constraint. A host where you control
+the image is more dependable.
 
 Hugging Face Spaces moved the Docker SDK behind a paid plan in July 2026, so
 a free personal account can no longer create one. The Space frontmatter above
