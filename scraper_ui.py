@@ -69,6 +69,12 @@ with st.sidebar:
     max_scrolls  = st.slider("Max Scrolls",       min_value=1,  max_value=20, value=10)
     get_detailed = st.toggle("Detailed Mode (slower, more accurate phone/address)", value=True)
 
+    if want_phone and not get_detailed:
+        st.warning(
+            "Phone numbers are only on a place's own page, not the result list. "
+            "Turn on Detailed Mode or the column will come back empty."
+        )
+
     run_btn = st.button("Start Scraping", type="primary", use_container_width=True)
 
 # ── Core scraper ──────────────────────────────────────────────────────────────
@@ -262,21 +268,59 @@ def dismiss_consent(driver):
             continue
 
 
+def strip_label(text):
+    """Drop the leading field name from an aria-label.
+
+    Google localises these ("Address:", "Phone:", "Direccion:", ...), so match
+    the shape rather than the English word.
+    """
+    if not text:
+        return None
+    return re.sub(r"^[^:]{0,24}:\s*", "", text.strip()) or None
+
+
+def read_phone(driver):
+    """Phone from an open place panel, or None.
+
+    Preferred source is data-item-id, which looks like "phone:tel:+911123415555"
+    and carries no translated text, unlike the aria-label.
+    """
+    try:
+        el = driver.find_element(By.CSS_SELECTOR, 'button[data-item-id^="phone"]')
+    except Exception:
+        return None
+    item_id = el.get_attribute("data-item-id") or ""
+    if "tel:" in item_id:
+        number = item_id.split("tel:", 1)[1].strip()
+        if number:
+            return number
+    return strip_label(el.get_attribute("aria-label"))
+
+
 def get_detailed_info(driver):
     info = {"address": None, "phone": None}
-    time.sleep(1.5)
+    # Wait for the place panel itself, rather than sleeping a fixed 1.5s and
+    # hoping. Any data-item-id button means the detail pane has rendered.
     try:
-        el = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-item-id="address"]'))
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-item-id]"))
         )
-        info["address"] = el.get_attribute("aria-label").replace("Address: ", "").strip()
-    except Exception:
-        pass
+    except TimeoutException:
+        return info
+
     try:
-        el = driver.find_element(By.CSS_SELECTOR, 'button[data-item-id*="phone"]')
-        info["phone"] = el.get_attribute("aria-label").replace("Phone: ", "").strip()
+        el = driver.find_element(By.CSS_SELECTOR, 'button[data-item-id="address"]')
+        info["address"] = strip_label(el.get_attribute("aria-label"))
     except Exception:
         pass
+
+    info["phone"] = read_phone(driver)
+    if info["phone"] is None:
+        # Rows of the panel can settle a beat apart; give it one more look
+        # before concluding the place genuinely has no number listed.
+        time.sleep(1.0)
+        info["phone"] = read_phone(driver)
+
     return info
 
 
