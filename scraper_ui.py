@@ -99,7 +99,7 @@ def find_browser_binary():
     return None
 
 
-def make_chrome_options(headless: bool, binary: str = None) -> Options:
+def make_chrome_options(headless: bool, binary: str = None, lean: bool = None) -> Options:
     opts = Options()
     if headless or ON_CLOUD:
         opts.add_argument("--headless=new")
@@ -107,7 +107,23 @@ def make_chrome_options(headless: bool, binary: str = None) -> Options:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1920,1080")
+
+    if lean is None:
+        lean = ON_CLOUD
+    if lean:
+        # Streamlit Cloud caps the container near 1 GB and a Maps place page is
+        # heavy enough to get the renderer OOM-killed, which kills the whole
+        # session. Drop everything that costs memory but carries no text.
+        opts.add_argument("--blink-settings=imagesEnabled=false")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--disable-background-networking")
+        opts.add_argument("--renderer-process-limit=1")
+        opts.add_argument("--js-flags=--max-old-space-size=256")
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--window-size=1280,900")
+    else:
+        opts.add_argument("--window-size=1920,1080")
     # Port 0 = let Chrome pick a free one; a fixed port collides across reruns.
     opts.add_argument("--remote-debugging-port=0")
 
@@ -211,7 +227,7 @@ def retry_with_installed_libs(headless: bool, log):
     env["LD_LIBRARY_PATH"] = ":".join(paths)
 
     log("Retrying browser launch against the unpacked libraries...")
-    opts = make_chrome_options(headless, binary=chrome)
+    opts = make_chrome_options(headless, binary=chrome)  # lean follows ON_CLOUD
     return webdriver.Chrome(service=Service(driver_path, env=env), options=opts)
 
 
@@ -420,6 +436,74 @@ def collect_cards(driver, log_fn) -> list:
     return cards
 
 
+MAX_RESTARTS = 3
+
+
+def first_line(exc) -> str:
+    """Selenium errors carry a page of stack trace; the log only needs the top."""
+    return str(exc).strip().splitlines()[0][:160]
+
+
+def session_is_dead(exc) -> bool:
+    """True when the browser itself has gone, not just the current operation."""
+    text = str(exc).lower()
+    return any(s in text for s in (
+        "invalid session id", "session deleted", "disconnected",
+        "chrome not reachable", "unable to send message to renderer",
+        "target window already closed",
+    ))
+
+
+def quit_quietly(driver) -> None:
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
+def fetch_details(driver, cards: list, headless: bool, log_fn):
+    """Visit each place for address and phone.
+
+    A place page can push the renderer past the host's memory limit and take
+    the whole session with it, so a dead browser is replaced and the pass
+    continues rather than losing every remaining row.
+    """
+    got_addr = got_phone = restarts = 0
+    total = len(cards)
+
+    for i, row in enumerate(cards, 1):
+        url = row.pop("url", None)
+        if not url:
+            continue
+        try:
+            driver.get(url)
+            detail = get_detailed_info(driver, log_fn if i == 1 else None)
+        except Exception as e:
+            if session_is_dead(e):
+                if restarts >= MAX_RESTARTS:
+                    log_fn(f"  browser keeps dying — stopping after {i - 1} places")
+                    break
+                restarts += 1
+                log_fn(f"  browser died, most likely out of memory — "
+                       f"restarting ({restarts}/{MAX_RESTARTS})")
+                quit_quietly(driver)
+                driver = make_driver(headless, log_fn)
+                continue
+            log_fn(f"  [{i}] detail failed: {first_line(e)}")
+            continue
+
+        if detail["address"]:
+            row["address"] = detail["address"]
+            got_addr += 1
+        if detail["phone"]:
+            row["phone"] = detail["phone"]
+            got_phone += 1
+        if i % 5 == 0 or i == total:
+            log_fn(f"  detailed {i}/{total} — {got_addr} addresses, {got_phone} phones")
+
+    return driver
+
+
 def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
            log_fn, result_store: list):
     driver = None
@@ -487,26 +571,7 @@ def scrape(query: str, max_scrolls: int, headless: bool, get_detailed: bool,
             no_url = sum(1 for r in cards if not r.get("url"))
             if no_url:
                 log_fn(f"  {no_url} of {len(cards)} cards had no place link")
-            got_addr = got_phone = 0
-            for i, row in enumerate(cards, 1):
-                url = row.pop("url", None)
-                if not url:
-                    continue
-                try:
-                    driver.get(url)
-                    # Narrate the first place so a cloud-only failure is visible.
-                    detail = get_detailed_info(driver, log_fn if i == 1 else None)
-                    if detail["address"]:
-                        row["address"] = detail["address"]
-                        got_addr += 1
-                    if detail["phone"]:
-                        row["phone"] = detail["phone"]
-                        got_phone += 1
-                except Exception as e:
-                    log_fn(f"  [{i}] {row['name']} — detail failed: {e}")
-                if i % 5 == 0 or i == len(cards):
-                    log_fn(f"  detailed {i}/{len(cards)}"
-                           f" — {got_addr} addresses, {got_phone} phones")
+            driver = fetch_details(driver, cards, headless, log_fn)
         else:
             for row in cards:
                 row.pop("url", None)
