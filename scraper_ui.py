@@ -146,7 +146,7 @@ def cached_binaries() -> dict:
     found = {}
     for label, pattern in (
         ("chromedriver", f"{home}/.cache/selenium/chromedriver/*/*/chromedriver"),
-        ("chrome", f"{home}/.cache/selenium/chrome/*/chrome"),
+        ("chrome", f"{home}/.cache/selenium/chrome/*/*/chrome"),
     ):
         hits = glob.glob(pattern)
         if hits:
